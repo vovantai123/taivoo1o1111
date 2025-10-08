@@ -1,5 +1,9 @@
 [build]
-postinstall = "apt-get update && apt-get install -y tesseract-ocr"
+postinstall = """
+apt-get update && \
+apt-get install -y tesseract-ocr libgl1 libglib2.0-0 && \
+pip install -r requirements.txt
+"""
 
 [service]
 start = "gunicorn split:app"
