@@ -6,7 +6,9 @@ import io
 import zipfile
 import re
 
-pytesseract.pytesseract.tesseract_cmd = r"C:\Program Files\Tesseract-OCR\tesseract.exe"
+# Render dùng Linux, Tesseract cài trong /usr/bin/
+pytesseract.pytesseract.tesseract_cmd = "/usr/bin/tesseract"
+
 
 app = Flask(__name__)
 
