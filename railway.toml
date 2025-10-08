@@ -1,9 +1,13 @@
 [build]
-postinstall = """
-apt-get update && apt-get install -y tesseract-ocr && \
-pip install --upgrade pip && \
+builder = "NIXPACKS"
+buildCommand = """
+apt-get update && \
+apt-get install -y tesseract-ocr libgl1-mesa-glx && \
 pip install -r requirements.txt
 """
 
+[env]
+PYTHONUNBUFFERED = "1"
+
 [service]
-start = "gunicorn split:app"
+startCommand = "gunicorn split:app"
