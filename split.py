@@ -7,7 +7,7 @@ import io
 import zipfile
 import re
 
-# Render dùng Linux, Tesseract cài trong /usr/bin/
+# ⚙️ Cấu hình Tesseract
 pytesseract.pytesseract.tesseract_cmd = "/usr/bin/tesseract"
 
 app = Flask(__name__)
@@ -21,13 +21,15 @@ def split_image():
         file = request.files["file"]
         img_bytes = np.frombuffer(file.read(), np.uint8)
         img = cv2.imdecode(img_bytes, cv2.IMREAD_COLOR)
+
+        # Chuyển grayscale và nhị phân
         gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
         _, thresh = cv2.threshold(gray, 180, 255, cv2.THRESH_BINARY_INV)
 
         contours, _ = cv2.findContours(thresh, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
         results = []
 
-        # --- OCR từng khung ---
+        # --- OCR từng khung phát hiện ---
         for cnt in contours:
             x, y, w, h = cv2.boundingRect(cnt)
             if w > 80 and h > 80:
@@ -37,62 +39,79 @@ def split_image():
                     roi, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
                     cv2.THRESH_BINARY, 31, 9
                 )
+
                 text = pytesseract.image_to_string(
                     roi, lang="eng+fra+spa", config="--oem 3 --psm 4"
                 )
 
+                # Chuẩn hóa lỗi OCR phổ biến
                 replacements = {"&": "À", "¢": "ç", "|": "l", "¢¢": "é"}
                 for wrong, right in replacements.items():
                     text = text.replace(wrong, right)
 
                 results.append((y, x, w, h, text.strip()))
 
-        # --- Sắp xếp các block ---
+        # --- Sắp xếp block theo thứ tự trên - dưới, trái - phải ---
         results.sort(key=lambda r: (r[0], r[1]))
 
         zip_buffer = io.BytesIO()
         with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zipf:
             block_index = 0
             i = 0
+
             while i < len(results):
                 y, x, w, h, text1 = results[i]
 
                 if i + 1 < len(results):
                     y2, x2, w2, h2, text2 = results[i + 1]
-                    if abs(y - y2) < 100:  # cùng hàng
-                        # --- Xác định vùng gộp chung ---
+                    if abs(y - y2) < 100:  # cùng hàng (TRƯỚC / SAU)
+                        # --- Xác định vùng gộp ---
                         x_min = min(x, x2)
                         x_max = max(x + w, x2 + w2)
                         y_top = min(y, y2)
-                        y_bottom = max(y + h, y2 + h2) + 200  # quét xuống dưới
+                        y_bottom = max(y + h, y2 + h2) + 200  # quét dư xuống
 
                         region = gray[y_top:y_bottom, x_min:x_max]
 
-                        # --- Dò vị trí thật của chữ PCS ---
+                        # --- OCR dò vị trí chữ PCS ---
                         ocr_data = pytesseract.image_to_data(
                             region, lang="eng", config="--psm 6", output_type=Output.DICT
                         )
 
                         pcs_y_bottom = None
+                        code_y_bottom = None
+
+                        # tìm PCS
                         for j, word in enumerate(ocr_data["text"]):
                             if "PCS" in word.upper():
                                 top = ocr_data["top"][j]
                                 height = ocr_data["height"][j]
-                                pcs_y_bottom = y_top + top + height + 60  # +60px margin
+                                pcs_y_bottom = y_top + top + height + 60
                                 break
 
-                        # Nếu tìm thấy PCS thì cắt tới đó
-                        if pcs_y_bottom:
-                            y_bottom = min(pcs_y_bottom, img.shape[0])
+                        # ⚡ dò dòng mã (chữ + số + /)
+                        for j, word in enumerate(ocr_data["text"]):
+                            text = word.strip().upper()
+                            if re.match(r"^[A-Z0-9/.\-]{5,}$", text) and "PCS" not in text:
+                                top = ocr_data["top"][j]
+                                height = ocr_data["height"][j]
+                                code_y_bottom = y_top + top + height + 150
+                                break
+
+                        # --- Quyết định điểm cắt dưới ---
+                        if pcs_y_bottom or code_y_bottom:
+                            y_bottom = min(
+                                max(filter(None, [pcs_y_bottom, code_y_bottom])),
+                                img.shape[0]
+                            )
                         else:
-                            # fallback nếu không thấy PCS
                             y_bottom = min(y_bottom + 150, img.shape[0])
 
-                        # --- Cắt block ra ảnh ---
+                        # --- Cắt block ra ---
                         crop = img[y_top:y_bottom, x_min:x_max]
                         _, enc = cv2.imencode(".jpg", crop)
 
-                        # --- Đọc phần mã CARE (nếu có) ---
+                        # --- Lấy tên file theo CARE CODE (nếu có) ---
                         roi_code = gray[max(y_bottom - 200, 0):y_bottom, x_min:x_max]
                         code_text = pytesseract.image_to_string(
                             roi_code, lang="eng", config="--psm 6"
@@ -121,6 +140,7 @@ def split_image():
         )
 
     except Exception as e:
+        print("[ERROR]", e)
         return jsonify({"error": str(e)}), 500
 
 
