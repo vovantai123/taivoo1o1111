@@ -66,14 +66,10 @@ def split_image():
                     y2, x2, w2, h2, text2 = results[i + 1]
                     if abs(y - y2) < 100:  # cùng hàng (TRƯỚC / SAU)
                         # --- Xác định vùng gộp ---
-                        # --- Xác định vùng gộp ---
                         x_min = min(x, x2)
                         x_max = max(x + w, x2 + w2)
                         y_top = min(y, y2)
                         y_bottom = max(y + h, y2 + h2) + 200  # quét dư xuống
-                        
-                        # ⚡ NEW: nới phần trên vì mã thường nằm ngay trước khung
-                        y_top = max(y_top - 150, 0)
 
                         region = gray[y_top:y_bottom, x_min:x_max]
 
