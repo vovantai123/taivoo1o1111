@@ -72,15 +72,22 @@ def split_image():
                         )
 
                         # Nếu tìm thấy chữ PCS thì cắt đến đó thôi
+                        # Nếu tìm thấy chữ PCS thì cắt bao gồm cả dòng đó
                         pcs_match = re.search(r"PCS", text_region, re.IGNORECASE)
                         if pcs_match:
-                            # Tìm vị trí xuất hiện của PCS trong hình (theo dòng OCR)
                             roi_lines = text_region.splitlines()
                             line_index = next((idx for idx, l in enumerate(roi_lines) if "PCS" in l.upper()), None)
                             if line_index is not None:
-                                # cắt đến dòng PCS thôi
+                                # Cắt thêm 1 dòng bên dưới để chắc chắn lấy đủ chữ PCS
                                 h_per_line = region.shape[0] // max(len(roi_lines), 1)
-                                y_bottom = y_top + h_per_line * (line_index + 1)
+                                y_bottom = y_top + h_per_line * (line_index + 2)
+                        
+                                # Không để vượt ra ngoài ảnh
+                                y_bottom = min(y_bottom, img.shape[0])
+                        else:
+                            # Nếu không thấy PCS, thêm margin nhỏ đề phòng
+                            y_bottom = min(y_bottom + 150, img.shape[0])
+
 
                         crop = img[y_top:y_bottom, x_min:x_max]
                         _, enc = cv2.imencode(".jpg", crop)
