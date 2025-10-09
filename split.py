@@ -89,16 +89,19 @@ def split_image():
                             y_bottom = min(y_bottom + 150, img.shape[0])
 
                         # --- Thêm padding & phóng to ảnh ---
-                        pad = 100  # biên mở rộng 100px
+                        # --- Thêm padding & phóng to ảnh rõ hơn ---
+                        pad = 200  # tăng biên an toàn
                         y1 = max(y_top - pad, 0)
                         y2 = min(y_bottom + pad, img.shape[0])
                         x1 = max(x_min - pad, 0)
                         x2 = min(x_max + pad, img.shape[1])
-
+                        
                         crop = img[y1:y2, x1:x2]
+                        
+                        # Phóng to mạnh để chữ rõ nét
+                        zoom = 2.8  # bạn có thể tăng lên 3.0 nếu cần
+                        crop = cv2.resize(crop, None, fx=zoom, fy=zoom, interpolation=cv2.INTER_CUBIC)
 
-                        # Phóng to nhẹ 1.5x cho dễ đọc
-                        crop = cv2.resize(crop, None, fx=1.5, fy=1.5, interpolation=cv2.INTER_CUBIC)
 
                         # --- Mã hóa lưu ---
                         _, enc = cv2.imencode(".jpg", crop)
