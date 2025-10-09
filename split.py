@@ -1,6 +1,7 @@
 from flask import Flask, request, send_file, jsonify
 import cv2
 import pytesseract
+from pytesseract import Output
 import numpy as np
 import io
 import zipfile
@@ -8,7 +9,6 @@ import re
 
 # Render dùng Linux, Tesseract cài trong /usr/bin/
 pytesseract.pytesseract.tesseract_cmd = "/usr/bin/tesseract"
-
 
 app = Flask(__name__)
 
@@ -60,50 +60,53 @@ def split_image():
                 if i + 1 < len(results):
                     y2, x2, w2, h2, text2 = results[i + 1]
                     if abs(y - y2) < 100:  # cùng hàng
-                        # Xác định vùng gộp chung
+                        # --- Xác định vùng gộp chung ---
                         x_min = min(x, x2)
                         x_max = max(x + w, x2 + w2)
                         y_top = min(y, y2)
-                        y_bottom = max(y + h, y2 + h2) + 200  # tạm lấy thêm để quét “PCS”
+                        y_bottom = max(y + h, y2 + h2) + 200  # quét xuống dưới
 
                         region = gray[y_top:y_bottom, x_min:x_max]
-                        text_region = pytesseract.image_to_string(
-                            region, lang="eng", config="--psm 6"
+
+                        # --- Dò vị trí thật của chữ PCS ---
+                        ocr_data = pytesseract.image_to_data(
+                            region, lang="eng", config="--psm 6", output_type=Output.DICT
                         )
 
-                        # Nếu tìm thấy chữ PCS thì cắt đến đó thôi
-                        # Nếu tìm thấy chữ PCS thì cắt bao gồm cả dòng đó
-                        pcs_match = re.search(r"PCS", text_region, re.IGNORECASE)
-                        if pcs_match:
-                            roi_lines = text_region.splitlines()
-                            line_index = next((idx for idx, l in enumerate(roi_lines) if "PCS" in l.upper()), None)
-                            if line_index is not None:
-                                # Cắt thêm 1 dòng bên dưới để chắc chắn lấy đủ chữ PCS
-                                h_per_line = region.shape[0] // max(len(roi_lines), 1)
-                                y_bottom = y_top + h_per_line * (line_index + 2)
-                        
-                                # Không để vượt ra ngoài ảnh
-                                y_bottom = min(y_bottom, img.shape[0])
+                        pcs_y_bottom = None
+                        for j, word in enumerate(ocr_data["text"]):
+                            if "PCS" in word.upper():
+                                top = ocr_data["top"][j]
+                                height = ocr_data["height"][j]
+                                pcs_y_bottom = y_top + top + height + 60  # +60px margin
+                                break
+
+                        # Nếu tìm thấy PCS thì cắt tới đó
+                        if pcs_y_bottom:
+                            y_bottom = min(pcs_y_bottom, img.shape[0])
                         else:
-                            # Nếu không thấy PCS, thêm margin nhỏ đề phòng
+                            # fallback nếu không thấy PCS
                             y_bottom = min(y_bottom + 150, img.shape[0])
 
-
+                        # --- Cắt block ra ảnh ---
                         crop = img[y_top:y_bottom, x_min:x_max]
                         _, enc = cv2.imencode(".jpg", crop)
 
-                        # Đọc phần mã CARE
-                        roi_code = gray[y_bottom - 150:y_bottom, x_min:x_max]
+                        # --- Đọc phần mã CARE (nếu có) ---
+                        roi_code = gray[max(y_bottom - 200, 0):y_bottom, x_min:x_max]
                         code_text = pytesseract.image_to_string(
                             roi_code, lang="eng", config="--psm 6"
                         ).strip()
 
                         match = re.search(r"(CARE\s*\d+)", code_text.upper())
-                        filename = match.group(1).replace(" ", "_") + ".jpg" if match else f"care_block_{block_index + 1}.jpg"
+                        if match:
+                            filename = match.group(1).replace(" ", "_") + ".jpg"
+                        else:
+                            filename = f"block_{block_index + 1}.jpg"
 
                         zipf.writestr(filename, enc.tobytes())
+                        print(f"[INFO] Saved block {block_index + 1}: {filename}")
 
-                        print(f"[INFO] CARE block {block_index + 1}: {filename}")
                         block_index += 1
                         i += 2
                         continue
