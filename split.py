@@ -69,7 +69,7 @@ def split_image():
                         x_min = min(x, x2)
                         x_max = max(x + w, x2 + w2)
                         y_top = min(y, y2)
-                        y_bottom = max(y + h, y2 + h2) + 200  # quét dư xuống
+                        y_bottom = max(y + h, y2 + h2) + 200  # quét dư xuống để dò chữ
 
                         region = gray[y_top:y_bottom, x_min:x_max]
 
@@ -81,34 +81,50 @@ def split_image():
                         pcs_y_bottom = None
                         code_y_bottom = None
 
-                        # tìm PCS
+                        # 🔍 tìm vị trí chữ "PCS"
                         for j, word in enumerate(ocr_data["text"]):
                             if "PCS" in word.upper():
                                 top = ocr_data["top"][j]
-                                height = ocr_data["height"][j]
-                                pcs_y_bottom = y_top + top + height + 60
+                                height_word = ocr_data["height"][j]
+                                pcs_y_bottom = y_top + top + height_word + 10  # dừng ngay sau chữ PCS
                                 break
 
-                        # ⚡ dò dòng mã (chữ + số + /)
+                        # 🔍 tìm dòng mã (chữ + số + /)
                         for j, word in enumerate(ocr_data["text"]):
                             text = word.strip().upper()
                             if re.match(r"^[A-Z0-9/.\-]{5,}$", text) and "PCS" not in text:
                                 top = ocr_data["top"][j]
-                                height = ocr_data["height"][j]
-                                code_y_bottom = y_top + top + height + 150
+                                height_word = ocr_data["height"][j]
+                                code_y_bottom = y_top + top + height_word + 80
                                 break
 
                         # --- Quyết định điểm cắt dưới ---
-                        if pcs_y_bottom or code_y_bottom:
-                            y_bottom = min(
-                                max(filter(None, [pcs_y_bottom, code_y_bottom])),
-                                img.shape[0]
-                            )
+                        # --- Quyết định điểm cắt dưới (xử lý cả CARE - CODE - PCS) ---
+                        care_y_bottom = None
+
+                        for j, word in enumerate(ocr_data["text"]):
+                            if "CARE" in word.upper():
+                                top = ocr_data["top"][j]
+                                height_word = ocr_data["height"][j]
+                                care_y_bottom = y_top + top + height_word + 20
+                                break
+
+                        # Lấy vị trí thấp nhất trong 3 loại (CARE, CODE, PCS)
+                        candidates = [v for v in [care_y_bottom, code_y_bottom, pcs_y_bottom] if v]
+                        if candidates:
+                            y_bottom = min(max(candidates) + 50, img.shape[0])  # +50 để lấy trọn dòng PCS
                         else:
                             y_bottom = min(y_bottom + 150, img.shape[0])
 
+
+                        # --- Dịch sang trái để có khoảng trống ---
+                        shift_left = 50  # pixel cần thụt sang trái
+                        x_min = max(x_min - shift_left, 0)
+
                         # --- Cắt block ra ---
                         crop = img[y_top:y_bottom, x_min:x_max]
+
+                        # --- Mã hóa ảnh ---
                         _, enc = cv2.imencode(".jpg", crop)
 
                         # --- Lấy tên file theo CARE CODE (nếu có) ---
