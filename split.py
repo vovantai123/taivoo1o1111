@@ -1,4 +1,4 @@
-from flask import Flask, request, send_file, jsonify
+rom flask import Flask, request, send_file, jsonify
 import cv2
 import pytesseract
 from pytesseract import Output
@@ -88,22 +88,8 @@ def split_image():
                             # fallback nếu không thấy PCS
                             y_bottom = min(y_bottom + 150, img.shape[0])
 
-                        # --- Thêm padding & phóng to ảnh ---
-                        # --- Thêm padding & phóng to ảnh rõ hơn ---
-                        pad = 200  # tăng biên an toàn
-                        y1 = max(y_top - pad, 0)
-                        y2 = min(y_bottom + pad, img.shape[0])
-                        x1 = max(x_min - pad, 0)
-                        x2 = min(x_max + pad, img.shape[1])
-                        
-                        crop = img[y1:y2, x1:x2]
-                        
-                        # Phóng to mạnh để chữ rõ nét
-                        zoom = 2.8  # bạn có thể tăng lên 3.0 nếu cần
-                        crop = cv2.resize(crop, None, fx=zoom, fy=zoom, interpolation=cv2.INTER_CUBIC)
-
-
-                        # --- Mã hóa lưu ---
+                        # --- Cắt block ra ảnh ---
+                        crop = img[y_top:y_bottom, x_min:x_max]
                         _, enc = cv2.imencode(".jpg", crop)
 
                         # --- Đọc phần mã CARE (nếu có) ---
