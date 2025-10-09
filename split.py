@@ -1,4 +1,4 @@
-rom flask import Flask, request, send_file, jsonify
+from flask import Flask, request, send_file, jsonify
 import cv2
 import pytesseract
 from pytesseract import Output
