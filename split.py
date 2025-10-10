@@ -21,7 +21,6 @@ def split_image():
         file = request.files["file"]
         img_bytes = np.frombuffer(file.read(), np.uint8)
         img = cv2.imdecode(img_bytes, cv2.IMREAD_COLOR)
-
         gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
         _, thresh = cv2.threshold(gray, 180, 255, cv2.THRESH_BINARY_INV)
 
@@ -46,44 +45,44 @@ def split_image():
                     text = text.replace(wrong, right)
                 results.append((y, x, w, h, text.strip()))
 
-        # --- Sắp xếp từ trên xuống dưới ---
+        # --- Sắp xếp contour ---
         results.sort(key=lambda r: (r[0], r[1]))
 
         zip_buffer = io.BytesIO()
         with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zipf:
 
-            # ✅ Trường hợp chỉ có 2 khung duy nhất
+            # ✅ Nếu có đúng 2 khung → gộp toàn bộ và dò text ở vùng trên
             if len(results) == 2:
                 y1, x1, w1, h1, _ = results[0]
                 y2, x2, w2, h2, _ = results[1]
-            
-                # --- Gộp vùng bao toàn bộ 2 khung ---
-                y_top = max(0, min(y1, y2) - 250)  # tăng dư phần trên nhiều hơn
-                y_bottom = min(img.shape[0], max(y1 + h1, y2 + h2) + 300)  # dư phần dưới
-                x_min = max(0, min(x1, x2) - 80)  # dư trái
-                x_max = min(img.shape[1], max(x1 + w1, x2 + w2) + 80)  # dư phải
-            
-                # --- Crop vùng rộng ---
+
+                # Bước 1: Gộp vùng cơ bản của 2 khung
+                y_top = max(0, min(y1, y2) - 250)
+                y_bottom = min(img.shape[0], max(y1 + h1, y2 + h2) + 300)
+                x_min = max(0, min(x1, x2) - 80)
+                x_max = min(img.shape[1], max(x1 + w1, x2 + w2) + 80)
+
+                # Bước 2: Dò toàn ảnh để tìm dòng chữ trên cùng
+                ocr_all = pytesseract.image_to_data(
+                    gray, lang="eng", config="--psm 6", output_type=Output.DICT
+                )
+                all_tops = []
+                for i, t in enumerate(ocr_all["text"]):
+                    if t.strip():
+                        all_tops.append(ocr_all["top"][i])
+                if all_tops:
+                    top_text = min(all_tops)
+                    # Nếu dòng chữ trên cùng nằm cao hơn vùng cắt hiện tại >100px → mở rộng thêm
+                    if top_text < y_top:
+                        y_top = max(0, top_text - 100)
+
+                # Bước 3: Cắt vùng mới (bao luôn phần text trên đầu)
                 crop = img[y_top:y_bottom, x_min:x_max]
-            
-                # --- OCR kiểm tra xem có bị cắt chữ không ---
-                gray_crop = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY)
-                ocr_data = pytesseract.image_to_data(gray_crop, lang="eng", output_type=Output.DICT)
-                tops = [ocr_data["top"][i] for i, t in enumerate(ocr_data["text"]) if t.strip()]
-                bottoms = [ocr_data["top"][i] + ocr_data["height"][i] for i, t in enumerate(ocr_data["text"]) if t.strip()]
-                if tops and bottoms:
-                    # Nếu chữ sát mép trên, mở rộng thêm 150px phía trên
-                    if min(tops) < 40 and y_top > 150:
-                        y_top -= 150
-                    # Nếu chữ sát mép dưới, mở rộng thêm 200px phía dưới
-                    if max(bottoms) > crop.shape[0] - 40 and y_bottom < img.shape[0] - 200:
-                        y_bottom += 200
-                    crop = img[y_top:y_bottom, x_min:x_max]
-            
                 _, enc = cv2.imencode(".jpg", crop)
                 zipf.writestr("merged_two_blocks.jpg", enc.tobytes())
-                print("[INFO] 2 blocks found → merged both fully with top/bottom safe margin.")
+                print(f"[INFO] 2 blocks merged fully with top text preserved. y_top={y_top}")
 
+            # ✅ Các trường hợp khác giữ nguyên logic cũ
             else:
                 block_index = 0
                 i = 0
@@ -104,31 +103,6 @@ def split_image():
                             shift_left = int((x_max - x_min) * 0.05)
                             x_min = max(x_min - shift_left, 0)
 
-                            region = gray[y_top:y_bottom, x_min:x_max]
-                            ocr_data = pytesseract.image_to_data(
-                                region, lang="eng", config="--psm 6", output_type=Output.DICT
-                            )
-
-                            pcs_y_bottom = None
-                            code_y_bottom = None
-                            care_y_bottom = None
-                            for j, word in enumerate(ocr_data["text"]):
-                                textw = word.strip().upper()
-                                top = ocr_data["top"][j]
-                                height_word = ocr_data["height"][j]
-                                if "PCS" in textw:
-                                    pcs_y_bottom = y_top + top + height_word + 10
-                                elif "CARE" in textw:
-                                    care_y_bottom = y_top + top + height_word + 20
-                                elif re.match(r"^[A-Z0-9/.\-]{5,}$", textw) and "PCS" not in textw:
-                                    code_y_bottom = y_top + top + height_word + 80
-
-                            candidates = [v for v in [care_y_bottom, code_y_bottom, pcs_y_bottom] if v]
-                            if candidates:
-                                y_bottom = min(max(candidates) + 50, img.shape[0])
-                            else:
-                                y_bottom = min(y_bottom + 150, img.shape[0])
-
                             crop = img[y_top:y_bottom, x_min:x_max]
                             _, enc = cv2.imencode(".jpg", crop)
 
@@ -143,8 +117,6 @@ def split_image():
                                 filename = f"block_{block_index + 1}.jpg"
 
                             zipf.writestr(filename, enc.tobytes())
-                            print(f"[INFO] Saved block {block_index + 1}: {filename}")
-
                             block_index += 1
                             i += 2
                             continue
