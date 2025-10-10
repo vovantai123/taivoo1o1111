@@ -28,7 +28,7 @@ def split_image():
         contours, _ = cv2.findContours(thresh, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
         results = []
 
-        # --- OCR từng khung phát hiện ---
+        # --- Lọc contour hợp lệ ---
         for cnt in contours:
             x, y, w, h = cv2.boundingRect(cnt)
             if w > 80 and h > 80:
@@ -38,109 +38,92 @@ def split_image():
                     roi, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
                     cv2.THRESH_BINARY, 31, 9
                 )
-
                 text = pytesseract.image_to_string(
                     roi, lang="eng+fra+spa", config="--oem 3 --psm 4"
                 )
-
-                # Chuẩn hóa lỗi OCR phổ biến
                 replacements = {"&": "À", "¢": "ç", "|": "l", "¢¢": "é"}
                 for wrong, right in replacements.items():
                     text = text.replace(wrong, right)
-
                 results.append((y, x, w, h, text.strip()))
 
-        # --- Sắp xếp block theo thứ tự trên - dưới, trái - phải ---
+        # --- Sắp xếp từ trên xuống dưới ---
         results.sort(key=lambda r: (r[0], r[1]))
 
         zip_buffer = io.BytesIO()
         with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zipf:
-            block_index = 0
-            i = 0
 
-            while i < len(results):
-                y, x, w, h, text1 = results[i]
+            # ✅ Nếu chỉ có 2 khung duy nhất → giữ nguyên ảnh gốc
+            if len(results) == 2:
+                _, enc_full = cv2.imencode(".jpg", img)
+                zipf.writestr("full_image.jpg", enc_full.tobytes())
+                print("[INFO] Only 2 blocks found → kept original image")
+            else:
+                block_index = 0
+                i = 0
+                while i < len(results):
+                    y, x, w, h, text1 = results[i]
 
-                if i + 1 < len(results):
-                    y2, x2, w2, h2, text2 = results[i + 1]
-                    # Hai contour cùng hàng (trước / sau)
-                    if abs(y - y2) < 100:
-                        # --- Vùng cơ bản ---
-                        y_top = min(y, y2)
-                        y_bottom = max(y + h, y2 + h2) + 200
+                    if i + 1 < len(results):
+                        y2, x2, w2, h2, text2 = results[i + 1]
+                        # Hai contour cùng hàng (trước / sau)
+                        if abs(y - y2) < 100:
+                            y_top = min(y, y2)
+                            y_bottom = max(y + h, y2 + h2) + 200
+                            x_min_raw = min(x, x2)
+                            x_max_raw = max(x + w, x2 + w2)
+                            mid_x = (x_min_raw + x_max_raw) // 2
+                            half_width = (x_max_raw - x_min_raw) // 2
+                            x_min = max(0, mid_x - half_width)
+                            x_max = min(img.shape[1], mid_x + half_width)
+                            shift_left = int((x_max - x_min) * 0.05)
+                            x_min = max(x_min - shift_left, 0)
 
-                        # --- Tính vùng ghép chính giữa ---
-                        x_min_raw = min(x, x2)
-                        x_max_raw = max(x + w, x2 + w2)
+                            region = gray[y_top:y_bottom, x_min:x_max]
+                            ocr_data = pytesseract.image_to_data(
+                                region, lang="eng", config="--psm 6", output_type=Output.DICT
+                            )
 
-                        # Căn giữa hai nhãn để tránh lệch
-                        mid_x = (x_min_raw + x_max_raw) // 2
-                        half_width = (x_max_raw - x_min_raw) // 2
+                            pcs_y_bottom = None
+                            code_y_bottom = None
+                            care_y_bottom = None
+                            for j, word in enumerate(ocr_data["text"]):
+                                textw = word.strip().upper()
+                                top = ocr_data["top"][j]
+                                height_word = ocr_data["height"][j]
+                                if "PCS" in textw:
+                                    pcs_y_bottom = y_top + top + height_word + 10
+                                elif "CARE" in textw:
+                                    care_y_bottom = y_top + top + height_word + 20
+                                elif re.match(r"^[A-Z0-9/.\-]{5,}$", textw) and "PCS" not in textw:
+                                    code_y_bottom = y_top + top + height_word + 80
 
-                        x_min = max(0, mid_x - half_width)
-                        x_max = min(img.shape[1], mid_x + half_width)
+                            candidates = [v for v in [care_y_bottom, code_y_bottom, pcs_y_bottom] if v]
+                            if candidates:
+                                y_bottom = min(max(candidates) + 50, img.shape[0])
+                            else:
+                                y_bottom = min(y_bottom + 150, img.shape[0])
 
-                        # --- Nới nhẹ sang trái (5% chiều rộng, tránh mất viền trái) ---
-                        shift_left = int((x_max - x_min) * 0.05)
-                        x_min = max(x_min - shift_left, 0)
+                            crop = img[y_top:y_bottom, x_min:x_max]
+                            _, enc = cv2.imencode(".jpg", crop)
 
-                        # --- Cắt vùng ---
-                        region = gray[y_top:y_bottom, x_min:x_max]
+                            roi_code = gray[max(y_bottom - 200, 0):y_bottom, x_min:x_max]
+                            code_text = pytesseract.image_to_string(
+                                roi_code, lang="eng", config="--psm 6"
+                            ).strip()
+                            match = re.search(r"(CARE\s*\d+)", code_text.upper())
+                            if match:
+                                filename = match.group(1).replace(" ", "_") + ".jpg"
+                            else:
+                                filename = f"block_{block_index + 1}.jpg"
 
-                        # --- OCR dò chữ CODE / PCS ---
-                        ocr_data = pytesseract.image_to_data(
-                            region, lang="eng", config="--psm 6", output_type=Output.DICT
-                        )
+                            zipf.writestr(filename, enc.tobytes())
+                            print(f"[INFO] Saved block {block_index + 1}: {filename}")
 
-                        pcs_y_bottom = None
-                        code_y_bottom = None
-                        care_y_bottom = None
+                            block_index += 1
+                            i += 2
+                            continue
 
-                        for j, word in enumerate(ocr_data["text"]):
-                            textw = word.strip().upper()
-                            top = ocr_data["top"][j]
-                            height_word = ocr_data["height"][j]
-
-                            if "PCS" in textw:
-                                pcs_y_bottom = y_top + top + height_word + 10
-                            elif "CARE" in textw:
-                                care_y_bottom = y_top + top + height_word + 20
-                            elif re.match(r"^[A-Z0-9/.\-]{5,}$", textw) and "PCS" not in textw:
-                                code_y_bottom = y_top + top + height_word + 80
-
-                        # --- Xác định vị trí cắt dưới ---
-                        candidates = [v for v in [care_y_bottom, code_y_bottom, pcs_y_bottom] if v]
-                        if candidates:
-                            y_bottom = min(max(candidates) + 50, img.shape[0])
-                        else:
-                            y_bottom = min(y_bottom + 150, img.shape[0])
-
-                        # --- Crop ---
-                        crop = img[y_top:y_bottom, x_min:x_max]
-
-                        # --- Encode ảnh ---
-                        _, enc = cv2.imencode(".jpg", crop)
-
-                        # --- Tìm CARE CODE để đặt tên ---
-                        roi_code = gray[max(y_bottom - 200, 0):y_bottom, x_min:x_max]
-                        code_text = pytesseract.image_to_string(
-                            roi_code, lang="eng", config="--psm 6"
-                        ).strip()
-
-                        match = re.search(r"(CARE\s*\d+)", code_text.upper())
-                        if match:
-                            filename = match.group(1).replace(" ", "_") + ".jpg"
-                        else:
-                            filename = f"block_{block_index + 1}.jpg"
-
-                        zipf.writestr(filename, enc.tobytes())
-                        print(f"[INFO] Saved block {block_index + 1}: {filename}")
-
-                        block_index += 1
-                        i += 2
-                        continue
-
-                i += 1
+                    i += 1
 
         zip_buffer.seek(0)
         return send_file(
