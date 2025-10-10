@@ -22,7 +22,6 @@ def split_image():
         img_bytes = np.frombuffer(file.read(), np.uint8)
         img = cv2.imdecode(img_bytes, cv2.IMREAD_COLOR)
 
-        # Chuyển grayscale và nhị phân
         gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
         _, thresh = cv2.threshold(gray, 180, 255, cv2.THRESH_BINARY_INV)
 
@@ -64,70 +63,65 @@ def split_image():
 
                 if i + 1 < len(results):
                     y2, x2, w2, h2, text2 = results[i + 1]
-                    if abs(y - y2) < 100:  # cùng hàng (TRƯỚC / SAU)
-                        # --- Xác định vùng gộp ---
-                        x_min = min(x, x2)
-                        x_max = max(x + w, x2 + w2)
+                    # Hai contour cùng hàng (trước / sau)
+                    if abs(y - y2) < 100:
+                        # --- Vùng cơ bản ---
                         y_top = min(y, y2)
-                        y_bottom = max(y + h, y2 + h2) + 200  # quét dư xuống để dò chữ
+                        y_bottom = max(y + h, y2 + h2) + 200
 
+                        # --- Tính vùng ghép chính giữa ---
+                        x_min_raw = min(x, x2)
+                        x_max_raw = max(x + w, x2 + w2)
+
+                        # Căn giữa hai nhãn để tránh lệch
+                        mid_x = (x_min_raw + x_max_raw) // 2
+                        half_width = (x_max_raw - x_min_raw) // 2
+
+                        x_min = max(0, mid_x - half_width)
+                        x_max = min(img.shape[1], mid_x + half_width)
+
+                        # --- Nới nhẹ sang trái (5% chiều rộng, tránh mất viền trái) ---
+                        shift_left = int((x_max - x_min) * 0.05)
+                        x_min = max(x_min - shift_left, 0)
+
+                        # --- Cắt vùng ---
                         region = gray[y_top:y_bottom, x_min:x_max]
 
-                        # --- OCR dò vị trí chữ PCS ---
+                        # --- OCR dò chữ CODE / PCS ---
                         ocr_data = pytesseract.image_to_data(
                             region, lang="eng", config="--psm 6", output_type=Output.DICT
                         )
 
                         pcs_y_bottom = None
                         code_y_bottom = None
-
-                        # 🔍 tìm vị trí chữ "PCS"
-                        for j, word in enumerate(ocr_data["text"]):
-                            if "PCS" in word.upper():
-                                top = ocr_data["top"][j]
-                                height_word = ocr_data["height"][j]
-                                pcs_y_bottom = y_top + top + height_word + 10  # dừng ngay sau chữ PCS
-                                break
-
-                        # 🔍 tìm dòng mã (chữ + số + /)
-                        for j, word in enumerate(ocr_data["text"]):
-                            text = word.strip().upper()
-                            if re.match(r"^[A-Z0-9/.\-]{5,}$", text) and "PCS" not in text:
-                                top = ocr_data["top"][j]
-                                height_word = ocr_data["height"][j]
-                                code_y_bottom = y_top + top + height_word + 80
-                                break
-
-                        # --- Quyết định điểm cắt dưới ---
-                        # --- Quyết định điểm cắt dưới (xử lý cả CARE - CODE - PCS) ---
                         care_y_bottom = None
 
                         for j, word in enumerate(ocr_data["text"]):
-                            if "CARE" in word.upper():
-                                top = ocr_data["top"][j]
-                                height_word = ocr_data["height"][j]
-                                care_y_bottom = y_top + top + height_word + 20
-                                break
+                            textw = word.strip().upper()
+                            top = ocr_data["top"][j]
+                            height_word = ocr_data["height"][j]
 
-                        # Lấy vị trí thấp nhất trong 3 loại (CARE, CODE, PCS)
+                            if "PCS" in textw:
+                                pcs_y_bottom = y_top + top + height_word + 10
+                            elif "CARE" in textw:
+                                care_y_bottom = y_top + top + height_word + 20
+                            elif re.match(r"^[A-Z0-9/.\-]{5,}$", textw) and "PCS" not in textw:
+                                code_y_bottom = y_top + top + height_word + 80
+
+                        # --- Xác định vị trí cắt dưới ---
                         candidates = [v for v in [care_y_bottom, code_y_bottom, pcs_y_bottom] if v]
                         if candidates:
-                            y_bottom = min(max(candidates) + 50, img.shape[0])  # +50 để lấy trọn dòng PCS
+                            y_bottom = min(max(candidates) + 50, img.shape[0])
                         else:
                             y_bottom = min(y_bottom + 150, img.shape[0])
 
-
-                        # --- Dịch sang trái để có khoảng trống ---
-                        shift_left = 50  # pixel cần thụt sang trái
-                        x_min = max(x_min - shift_left, 0)
-
-                        # --- Cắt block ra ---
+                        # --- Crop ---
                         crop = img[y_top:y_bottom, x_min:x_max]
 
-                        # --- Mã hóa ảnh ---
+                        # --- Encode ảnh ---
                         _, enc = cv2.imencode(".jpg", crop)
 
-                        # --- Lấy tên file theo CARE CODE (nếu có) ---
+                        # --- Tìm CARE CODE để đặt tên ---
                         roi_code = gray[max(y_bottom - 200, 0):y_bottom, x_min:x_max]
                         code_text = pytesseract.image_to_string(
                             roi_code, lang="eng", config="--psm 6"
@@ -145,6 +139,7 @@ def split_image():
                         block_index += 1
                         i += 2
                         continue
+
                 i += 1
 
         zip_buffer.seek(0)
