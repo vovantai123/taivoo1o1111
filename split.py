@@ -52,11 +52,21 @@ def split_image():
         zip_buffer = io.BytesIO()
         with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zipf:
 
-            # ✅ Nếu chỉ có 2 khung duy nhất → giữ nguyên ảnh gốc
+            # ✅ Trường hợp chỉ có 2 khung duy nhất
             if len(results) == 2:
-                _, enc_full = cv2.imencode(".jpg", img)
-                zipf.writestr("full_image.jpg", enc_full.tobytes())
-                print("[INFO] Only 2 blocks found → kept original image")
+                y1, x1, w1, h1, _ = results[0]
+                y2, x2, w2, h2, _ = results[1]
+
+                y_top = max(0, min(y1, y2) - 100)  # chừa dư 100px phía trên
+                y_bottom = min(img.shape[0], max(y1 + h1, y2 + h2) + 200)  # dư 200px phía dưới
+                x_min = max(0, min(x1, x2) - 50)  # dư trái
+                x_max = min(img.shape[1], max(x1 + w1, x2 + w2) + 50)  # dư phải
+
+                crop = img[y_top:y_bottom, x_min:x_max]
+                _, enc = cv2.imencode(".jpg", crop)
+
+                zipf.writestr("merged_two_blocks.jpg", enc.tobytes())
+                print("[INFO] 2 blocks found → merged both fully.")
             else:
                 block_index = 0
                 i = 0
@@ -65,7 +75,6 @@ def split_image():
 
                     if i + 1 < len(results):
                         y2, x2, w2, h2, text2 = results[i + 1]
-                        # Hai contour cùng hàng (trước / sau)
                         if abs(y - y2) < 100:
                             y_top = min(y, y2)
                             y_bottom = max(y + h, y2 + h2) + 200
@@ -122,7 +131,6 @@ def split_image():
                             block_index += 1
                             i += 2
                             continue
-
                     i += 1
 
         zip_buffer.seek(0)
