@@ -56,17 +56,34 @@ def split_image():
             if len(results) == 2:
                 y1, x1, w1, h1, _ = results[0]
                 y2, x2, w2, h2, _ = results[1]
-
-                y_top = max(0, min(y1, y2) - 100)  # chừa dư 100px phía trên
-                y_bottom = min(img.shape[0], max(y1 + h1, y2 + h2) + 200)  # dư 200px phía dưới
-                x_min = max(0, min(x1, x2) - 50)  # dư trái
-                x_max = min(img.shape[1], max(x1 + w1, x2 + w2) + 50)  # dư phải
-
+            
+                # --- Gộp vùng bao toàn bộ 2 khung ---
+                y_top = max(0, min(y1, y2) - 250)  # tăng dư phần trên nhiều hơn
+                y_bottom = min(img.shape[0], max(y1 + h1, y2 + h2) + 300)  # dư phần dưới
+                x_min = max(0, min(x1, x2) - 80)  # dư trái
+                x_max = min(img.shape[1], max(x1 + w1, x2 + w2) + 80)  # dư phải
+            
+                # --- Crop vùng rộng ---
                 crop = img[y_top:y_bottom, x_min:x_max]
+            
+                # --- OCR kiểm tra xem có bị cắt chữ không ---
+                gray_crop = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY)
+                ocr_data = pytesseract.image_to_data(gray_crop, lang="eng", output_type=Output.DICT)
+                tops = [ocr_data["top"][i] for i, t in enumerate(ocr_data["text"]) if t.strip()]
+                bottoms = [ocr_data["top"][i] + ocr_data["height"][i] for i, t in enumerate(ocr_data["text"]) if t.strip()]
+                if tops and bottoms:
+                    # Nếu chữ sát mép trên, mở rộng thêm 150px phía trên
+                    if min(tops) < 40 and y_top > 150:
+                        y_top -= 150
+                    # Nếu chữ sát mép dưới, mở rộng thêm 200px phía dưới
+                    if max(bottoms) > crop.shape[0] - 40 and y_bottom < img.shape[0] - 200:
+                        y_bottom += 200
+                    crop = img[y_top:y_bottom, x_min:x_max]
+            
                 _, enc = cv2.imencode(".jpg", crop)
-
                 zipf.writestr("merged_two_blocks.jpg", enc.tobytes())
-                print("[INFO] 2 blocks found → merged both fully.")
+                print("[INFO] 2 blocks found → merged both fully with top/bottom safe margin.")
+
             else:
                 block_index = 0
                 i = 0
