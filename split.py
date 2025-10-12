@@ -23,65 +23,61 @@ def split_image():
         _, thresh = cv2.threshold(gray, 180, 255, cv2.THRESH_BINARY_INV)
 
         contours, _ = cv2.findContours(thresh, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-        results = []
+        blocks = []
 
-        # --- Lọc contour hợp lệ ---
+        # Lọc contour hợp lệ (2 khung chính)
         for cnt in contours:
             x, y, w, h = cv2.boundingRect(cnt)
             if w > 80 and h > 80:
-                results.append((y, x, w, h))
-        results.sort(key=lambda r: (r[0], r[1]))
+                blocks.append((x, y, w, h))
 
+        # Sắp xếp từ trái qua phải
+        blocks.sort(key=lambda b: b[0])
+        if len(blocks) < 2:
+            return jsonify({"error": "Không phát hiện đủ 2 khung để gộp"}), 400
+
+        # ✅ Lấy 2 khung chính
+        x1, y1, w1, h1 = blocks[0]
+        x2, y2, w2, h2 = blocks[1]
+
+        # Gộp 2 khung
+        x_min = max(0, min(x1, x2) - 50)
+        x_max = min(img.shape[1], max(x1 + w1, x2 + w2) + 50)
+        y_top = max(0, min(y1, y2) - 100)
+
+        # --- Tìm dòng PCS để xác định y_bottom ---
+        ocr_data = pytesseract.image_to_data(
+            gray, lang="eng", config="--psm 6", output_type=Output.DICT
+        )
+
+        pcs_y_bottom = None
+        for i, text in enumerate(ocr_data["text"]):
+            t = text.strip().upper()
+            if "PCS" in t:
+                pcs_y_bottom = ocr_data["top"][i] + ocr_data["height"][i]
+        if pcs_y_bottom:
+            y_bottom = min(pcs_y_bottom + 50, img.shape[0])  # đủ để không cắt mất dòng PCS
+        else:
+            y_bottom = max(y1 + h1, y2 + h2) + 150  # fallback nếu OCR không thấy PCS
+
+        # Cắt vùng cuối cùng
+        crop = img[y_top:y_bottom, x_min:x_max]
+
+        # ✅ Kiểm tra xem vùng dưới có chứa “501M” hay “PCS” không
+        check_text = pytesseract.image_to_string(
+            crop, lang="eng", config="--psm 6"
+        ).upper()
+        if not ("PCS" in check_text or "501M" in check_text):
+            # Nếu không có, mở rộng nhẹ xuống dưới
+            extend = 100
+            y_bottom = min(y_bottom + extend, img.shape[0])
+            crop = img[y_top:y_bottom, x_min:x_max]
+
+        # Ghi file zip
         zip_buffer = io.BytesIO()
         with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zipf:
-
-            if len(results) == 2:
-                y1, x1, w1, h1 = results[0]
-                y2, x2, w2, h2 = results[1]
-
-                y_top = max(0, min(y1, y2) - 200)
-                x_min = max(0, min(x1, x2) - 60)
-                x_max = min(img.shape[1], max(x1 + w1, x2 + w2) + 60)
-
-                # --- Dò vùng dưới để tìm “PCS” chính xác ---
-                h_img = img.shape[0]
-                bottom_zone_y = int(h_img * 0.35)
-                roi_bottom = gray[bottom_zone_y:h_img, :]
-                text_bottom = pytesseract.image_to_string(
-                    roi_bottom, lang="eng", config="--psm 6"
-                )
-
-                pcs_line = re.search(r"(\d[\d., ]*PCS)", text_bottom.upper())
-                if pcs_line:
-                    # Lấy toạ độ tương ứng của dòng “PCS”
-                    data = pytesseract.image_to_data(
-                        roi_bottom, lang="eng", config="--psm 6", output_type=Output.DICT
-                    )
-                    pcs_y_bottom = None
-                    for i, word in enumerate(data["text"]):
-                        if "PCS" in word.upper():
-                            pcs_y_bottom = bottom_zone_y + data["top"][i] + data["height"][i]
-                            break
-                    if pcs_y_bottom:
-                        y_bottom = min(pcs_y_bottom + 50, int(h_img * 0.9))
-                    else:
-                        y_bottom = int(h_img * 0.9)
-                else:
-                    # fallback an toàn
-                    y_bottom = int(h_img * 0.9)
-
-                # --- Cắt hình ---
-                crop = img[y_top:y_bottom, x_min:x_max]
-                _, enc = cv2.imencode(".jpg", crop)
-                zipf.writestr("merged_two_blocks.jpg", enc.tobytes())
-                print(f"[INFO] Cropped up to PCS line (y_bottom={y_bottom})")
-
-            else:
-                # Giữ logic cũ
-                for i, (y, x, w, h) in enumerate(results):
-                    crop = img[y:y + h, x:x + w]
-                    _, enc = cv2.imencode(".jpg", crop)
-                    zipf.writestr(f"block_{i + 1}.jpg", enc.tobytes())
+            _, enc = cv2.imencode(".jpg", crop)
+            zipf.writestr("label_pair_with_pcs.jpg", enc.tobytes())
 
         zip_buffer.seek(0)
         return send_file(
