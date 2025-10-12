@@ -7,12 +7,9 @@ import io
 import zipfile
 import re
 
-# ⚙️ Cấu hình Tesseract
 pytesseract.pytesseract.tesseract_cmd = "/usr/bin/tesseract"
-
 app = Flask(__name__)
 
-@app.route("/split", methods=["POST"])
 @app.route("/split", methods=["POST"])
 def split_image():
     try:
@@ -32,94 +29,59 @@ def split_image():
         for cnt in contours:
             x, y, w, h = cv2.boundingRect(cnt)
             if w > 80 and h > 80:
-                roi = gray[y:y + h, x:x + w]
-                roi = cv2.resize(roi, None, fx=3, fy=3, interpolation=cv2.INTER_CUBIC)
-                roi = cv2.adaptiveThreshold(
-                    roi, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
-                    cv2.THRESH_BINARY, 31, 9
-                )
-                text = pytesseract.image_to_string(
-                    roi, lang="eng+fra+spa", config="--oem 3 --psm 4"
-                )
-                replacements = {"&": "À", "¢": "ç", "|": "l", "¢¢": "é"}
-                for wrong, right in replacements.items():
-                    text = text.replace(wrong, right)
-                results.append((y, x, w, h, text.strip()))
-
+                results.append((y, x, w, h))
         results.sort(key=lambda r: (r[0], r[1]))
 
         zip_buffer = io.BytesIO()
         with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zipf:
 
-            # ✅ Nếu có đúng 2 khung (như ví dụ)
             if len(results) == 2:
-                y1, x1, w1, h1, _ = results[0]
-                y2, x2, w2, h2, _ = results[1]
+                y1, x1, w1, h1 = results[0]
+                y2, x2, w2, h2 = results[1]
 
-                # Gộp nhẹ hai khung thành vùng cắt chung
                 y_top = max(0, min(y1, y2) - 200)
-                x_min = max(0, min(x1, x2) - 80)
-                x_max = min(img.shape[1], max(x1 + w1, x2 + w2) + 80)
+                x_min = max(0, min(x1, x2) - 60)
+                x_max = min(img.shape[1], max(x1 + w1, x2 + w2) + 60)
 
-                # Dò dòng cuối cùng có chứa PCS để giới hạn y_bottom
-                ocr_all = pytesseract.image_to_data(
-                    gray, lang="eng", config="--psm 6", output_type=Output.DICT
+                # --- Dò vùng dưới để tìm “PCS” chính xác ---
+                h_img = img.shape[0]
+                bottom_zone_y = int(h_img * 0.35)
+                roi_bottom = gray[bottom_zone_y:h_img, :]
+                text_bottom = pytesseract.image_to_string(
+                    roi_bottom, lang="eng", config="--psm 6"
                 )
 
-                pcs_y_bottom = None
-                for i, t in enumerate(ocr_all["text"]):
-                    text = t.strip().upper()
-                    if "PCS" in text:
-                        pcs_y_bottom = ocr_all["top"][i] + ocr_all["height"][i]
-                if pcs_y_bottom:
-                    y_bottom = min(pcs_y_bottom + 40, img.shape[0])  # +40 để không cắt mất dòng
+                pcs_line = re.search(r"(\d[\d., ]*PCS)", text_bottom.upper())
+                if pcs_line:
+                    # Lấy toạ độ tương ứng của dòng “PCS”
+                    data = pytesseract.image_to_data(
+                        roi_bottom, lang="eng", config="--psm 6", output_type=Output.DICT
+                    )
+                    pcs_y_bottom = None
+                    for i, word in enumerate(data["text"]):
+                        if "PCS" in word.upper():
+                            pcs_y_bottom = bottom_zone_y + data["top"][i] + data["height"][i]
+                            break
+                    if pcs_y_bottom:
+                        y_bottom = min(pcs_y_bottom + 50, int(h_img * 0.9))
+                    else:
+                        y_bottom = int(h_img * 0.9)
                 else:
-                    y_bottom = min(img.shape[0], max(y1 + h1, y2 + h2) + 200)
+                    # fallback an toàn
+                    y_bottom = int(h_img * 0.9)
 
+                # --- Cắt hình ---
                 crop = img[y_top:y_bottom, x_min:x_max]
                 _, enc = cv2.imencode(".jpg", crop)
                 zipf.writestr("merged_two_blocks.jpg", enc.tobytes())
-                print(f"[INFO] 2 blocks merged until PCS line (y_bottom={y_bottom}).")
+                print(f"[INFO] Cropped up to PCS line (y_bottom={y_bottom})")
 
             else:
-                # ✅ Logic cũ cho các trường hợp nhiều khung
-                block_index = 0
-                i = 0
-                while i < len(results):
-                    y, x, w, h, text1 = results[i]
-
-                    if i + 1 < len(results):
-                        y2, x2, w2, h2, text2 = results[i + 1]
-                        if abs(y - y2) < 100:
-                            y_top = min(y, y2)
-                            y_bottom = max(y + h, y2 + h2) + 200
-                            x_min_raw = min(x, x2)
-                            x_max_raw = max(x + w, x2 + w2)
-                            mid_x = (x_min_raw + x_max_raw) // 2
-                            half_width = (x_max_raw - x_min_raw) // 2
-                            x_min = max(0, mid_x - half_width)
-                            x_max = min(img.shape[1], mid_x + half_width)
-                            shift_left = int((x_max - x_min) * 0.05)
-                            x_min = max(x_min - shift_left, 0)
-
-                            crop = img[y_top:y_bottom, x_min:x_max]
-                            _, enc = cv2.imencode(".jpg", crop)
-
-                            roi_code = gray[max(y_bottom - 200, 0):y_bottom, x_min:x_max]
-                            code_text = pytesseract.image_to_string(
-                                roi_code, lang="eng", config="--psm 6"
-                            ).strip()
-                            match = re.search(r"(CARE\s*\d+)", code_text.upper())
-                            if match:
-                                filename = match.group(1).replace(" ", "_") + ".jpg"
-                            else:
-                                filename = f"block_{block_index + 1}.jpg"
-
-                            zipf.writestr(filename, enc.tobytes())
-                            block_index += 1
-                            i += 2
-                            continue
-                    i += 1
+                # Giữ logic cũ
+                for i, (y, x, w, h) in enumerate(results):
+                    crop = img[y:y + h, x:x + w]
+                    _, enc = cv2.imencode(".jpg", crop)
+                    zipf.writestr(f"block_{i + 1}.jpg", enc.tobytes())
 
         zip_buffer.seek(0)
         return send_file(
@@ -132,7 +94,6 @@ def split_image():
     except Exception as e:
         print("[ERROR]", e)
         return jsonify({"error": str(e)}), 500
-
 
 
 if __name__ == "__main__":
