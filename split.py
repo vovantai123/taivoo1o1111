@@ -58,15 +58,10 @@ def split_image():
                     y2, x2, w2, h2, text2 = results[i + 1]
                     if abs(y - y2) < 100:  # cùng hàng
                         # Xác định vùng gộp chung
-                        padding_top = 50
-                        padding_bottom = 100
-                        x_min = min(x, x2)
-                        x_max = max(x + w, x2 + w2)
-                        y_top = max(0, min(y, y2) - padding_top)
-                        y_bottom = min(img.shape[0], max(y + h, y2 + h2) + padding_bottom)
-                        
+                        y_top = min(y, y2)
+                        y_bottom = max(y + h, y2 + h2) + 150
                         region = gray[y_top:y_bottom, x_min:x_max]
-                        # Xác định vùng gộp chung (thêm padding)
+
 
 
                         # --- Tìm chính xác dòng PCS bằng OCR data ---
