@@ -77,7 +77,7 @@ def split_image():
 
                         # Nếu tìm thấy dòng PCS → cắt đến đó
                         if pcs_y is not None:
-                            y_bottom = y_top + pcs_y + 40  # chỉ +40px an toàn
+                            y_bottom = y_top + pcs_y + 120  # chỉ +40px an toàn
                         else:
                             # không thấy PCS thì chỉ mở rộng 100px nữa
                             y_bottom = y_bottom - 50
