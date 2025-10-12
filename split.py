@@ -1,13 +1,15 @@
 from flask import Flask, request, send_file, jsonify
 import cv2
 import pytesseract
-from pytesseract import Output
 import numpy as np
 import io
 import zipfile
 import re
 
+# Render dùng Linux, Tesseract cài trong /usr/bin/
 pytesseract.pytesseract.tesseract_cmd = "/usr/bin/tesseract"
+
+
 app = Flask(__name__)
 
 @app.route("/split", methods=["POST"])
@@ -23,61 +25,82 @@ def split_image():
         _, thresh = cv2.threshold(gray, 180, 255, cv2.THRESH_BINARY_INV)
 
         contours, _ = cv2.findContours(thresh, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-        blocks = []
+        results = []
 
-        # Lọc contour hợp lệ (2 khung chính)
+        # --- OCR từng khung ---
         for cnt in contours:
             x, y, w, h = cv2.boundingRect(cnt)
             if w > 80 and h > 80:
-                blocks.append((x, y, w, h))
+                roi = gray[y:y + h, x:x + w]
+                roi = cv2.resize(roi, None, fx=3, fy=3, interpolation=cv2.INTER_CUBIC)
+                roi = cv2.adaptiveThreshold(
+                    roi, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
+                    cv2.THRESH_BINARY, 31, 9
+                )
+                text = pytesseract.image_to_string(
+                    roi, lang="eng+fra+spa", config="--oem 3 --psm 4"
+                )
 
-        # Sắp xếp từ trái qua phải
-        blocks.sort(key=lambda b: b[0])
-        if len(blocks) < 2:
-            return jsonify({"error": "Không phát hiện đủ 2 khung để gộp"}), 400
+                replacements = {"&": "À", "¢": "ç", "|": "l", "¢¢": "é"}
+                for wrong, right in replacements.items():
+                    text = text.replace(wrong, right)
 
-        # ✅ Lấy 2 khung chính
-        x1, y1, w1, h1 = blocks[0]
-        x2, y2, w2, h2 = blocks[1]
+                results.append((y, x, w, h, text.strip()))
 
-        # Gộp 2 khung
-        x_min = max(0, min(x1, x2) - 50)
-        x_max = min(img.shape[1], max(x1 + w1, x2 + w2) + 50)
-        y_top = max(0, min(y1, y2) - 100)
+        # --- Sắp xếp các block ---
+        results.sort(key=lambda r: (r[0], r[1]))
 
-        # --- Tìm dòng PCS để xác định y_bottom ---
-        ocr_data = pytesseract.image_to_data(
-            gray, lang="eng", config="--psm 6", output_type=Output.DICT
-        )
-
-        pcs_y_bottom = None
-        for i, text in enumerate(ocr_data["text"]):
-            t = text.strip().upper()
-            if "PCS" in t:
-                pcs_y_bottom = ocr_data["top"][i] + ocr_data["height"][i]
-        if pcs_y_bottom:
-            y_bottom = min(pcs_y_bottom + 50, img.shape[0])  # đủ để không cắt mất dòng PCS
-        else:
-            y_bottom = max(y1 + h1, y2 + h2) + 150  # fallback nếu OCR không thấy PCS
-
-        # Cắt vùng cuối cùng
-        crop = img[y_top:y_bottom, x_min:x_max]
-
-        # ✅ Kiểm tra xem vùng dưới có chứa “501M” hay “PCS” không
-        check_text = pytesseract.image_to_string(
-            crop, lang="eng", config="--psm 6"
-        ).upper()
-        if not ("PCS" in check_text or "501M" in check_text):
-            # Nếu không có, mở rộng nhẹ xuống dưới
-            extend = 100
-            y_bottom = min(y_bottom + extend, img.shape[0])
-            crop = img[y_top:y_bottom, x_min:x_max]
-
-        # Ghi file zip
         zip_buffer = io.BytesIO()
         with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zipf:
-            _, enc = cv2.imencode(".jpg", crop)
-            zipf.writestr("label_pair_with_pcs.jpg", enc.tobytes())
+            block_index = 0
+            i = 0
+            while i < len(results):
+                y, x, w, h, text1 = results[i]
+
+                if i + 1 < len(results):
+                    y2, x2, w2, h2, text2 = results[i + 1]
+                    if abs(y - y2) < 100:  # cùng hàng
+                        # Xác định vùng gộp chung
+                        x_min = min(x, x2)
+                        x_max = max(x + w, x2 + w2)
+                        y_top = min(y, y2)
+                        y_bottom = max(y + h, y2 + h2) + 200  # tạm lấy thêm để quét “PCS”
+
+                        region = gray[y_top:y_bottom, x_min:x_max]
+                        text_region = pytesseract.image_to_string(
+                            region, lang="eng", config="--psm 6"
+                        )
+
+                        # Nếu tìm thấy chữ PCS thì cắt đến đó thôi
+                        pcs_match = re.search(r"PCS", text_region, re.IGNORECASE)
+                        if pcs_match:
+                            # Tìm vị trí xuất hiện của PCS trong hình (theo dòng OCR)
+                            roi_lines = text_region.splitlines()
+                            line_index = next((idx for idx, l in enumerate(roi_lines) if "PCS" in l.upper()), None)
+                            if line_index is not None:
+                                # cắt đến dòng PCS thôi
+                                h_per_line = region.shape[0] // max(len(roi_lines), 1)
+                                y_bottom = y_top + h_per_line * (line_index + 1)
+
+                        crop = img[y_top:y_bottom, x_min:x_max]
+                        _, enc = cv2.imencode(".jpg", crop)
+
+                        # Đọc phần mã CARE
+                        roi_code = gray[y_bottom - 150:y_bottom, x_min:x_max]
+                        code_text = pytesseract.image_to_string(
+                            roi_code, lang="eng", config="--psm 6"
+                        ).strip()
+
+                        match = re.search(r"(CARE\s*\d+)", code_text.upper())
+                        filename = match.group(1).replace(" ", "_") + ".jpg" if match else f"care_block_{block_index + 1}.jpg"
+
+                        zipf.writestr(filename, enc.tobytes())
+
+                        print(f"[INFO] CARE block {block_index + 1}: {filename}")
+                        block_index += 1
+                        i += 2
+                        continue
+                i += 1
 
         zip_buffer.seek(0)
         return send_file(
@@ -88,7 +111,6 @@ def split_image():
         )
 
     except Exception as e:
-        print("[ERROR]", e)
         return jsonify({"error": str(e)}), 500
 
 
