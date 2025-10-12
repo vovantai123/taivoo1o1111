@@ -1,119 +1,117 @@
 from flask import Flask, request, send_file, jsonify
 import cv2
 import pytesseract
-from pytesseract import Output
 import numpy as np
 import io
 import zipfile
 import re
 
 pytesseract.pytesseract_cmd = "/usr/bin/tesseract"
+
 app = Flask(__name__)
 
 @app.route("/split", methods=["POST"])
 def split_image():
     try:
         if "file" not in request.files:
-            return jsonify({"error": "Không có file"}), 400
+            return jsonify({"error": "Không tìm thấy file trong request"}), 400
 
         file = request.files["file"]
         img_bytes = np.frombuffer(file.read(), np.uint8)
         img = cv2.imdecode(img_bytes, cv2.IMREAD_COLOR)
         gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-
-        # Threshold rõ nét để lấy contour
         _, thresh = cv2.threshold(gray, 180, 255, cv2.THRESH_BINARY_INV)
 
-        # --- Lấy contour và lọc khung lớn (2 nhãn mỗi hàng) ---
         contours, _ = cv2.findContours(thresh, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-        boxes = []
+        results = []
+
+        # --- OCR từng khung ---
         for cnt in contours:
             x, y, w, h = cv2.boundingRect(cnt)
-            if w > 100 and h > 100:
-                boxes.append((x, y, w, h))
+            if w > 80 and h > 80:
+                roi = gray[y:y + h, x:x + w]
+                roi = cv2.resize(roi, None, fx=3, fy=3, interpolation=cv2.INTER_CUBIC)
+                roi = cv2.adaptiveThreshold(
+                    roi, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
+                    cv2.THRESH_BINARY, 31, 9
+                )
+                text = pytesseract.image_to_string(
+                    roi, lang="eng+fra+spa", config="--oem 3 --psm 4"
+                )
 
-        if len(boxes) < 2:
-            return jsonify({"error": "Không phát hiện đủ khung"}), 400
+                replacements = {"&": "À", "¢": "ç", "|": "l", "¢¢": "é"}
+                for wrong, right in replacements.items():
+                    text = text.replace(wrong, right)
 
-        # Sắp xếp theo y (từ trên xuống)
-        boxes.sort(key=lambda b: (b[1], b[0]))
+                results.append((y, x, w, h, text.strip()))
+
+        results.sort(key=lambda r: (r[0], r[1]))
 
         zip_buffer = io.BytesIO()
         with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zipf:
+            block_index = 0
             i = 0
-            label_index = 1
+            while i < len(results):
+                y, x, w, h, text1 = results[i]
 
-            while i < len(boxes) - 1:
-                x1, y1, w1, h1 = boxes[i]
-                x2, y2, w2, h2 = boxes[i + 1]
+                if i + 1 < len(results):
+                    y2, x2, w2, h2, text2 = results[i + 1]
+                    if abs(y - y2) < 100:  # cùng hàng
+                        # Xác định vùng gộp chung
+                        x_min = min(x, x2)
+                        x_max = max(x + w, x2 + w2)
+                        y_top = min(y, y2)
+                        y_bottom = max(y + h, y2 + h2) + 150  # tạm mở rộng nhẹ
 
-                # Nếu 2 khung nằm gần cùng hàng (tức là 1 cặp)
-                if abs(y1 - y2) < 150:
-                    # Lấy vùng bao quanh 2 khung
-                    x_min = max(0, min(x1, x2) - 40)
-                    x_max = min(img.shape[1], max(x1 + w1, x2 + w2) + 40)
-                    y_top = max(0, min(y1, y2) - 100)
-                    y_block_bottom = max(y1 + h1, y2 + h2)
+                        region = gray[y_top:y_bottom, x_min:x_max]
 
-                    # Tìm phần text bên dưới để lấy CARE/MÃ/PCS
-                    search_y1 = y_block_bottom
-                    search_y2 = min(search_y1 + 800, img.shape[0])
-                    roi = gray[search_y1:search_y2, x_min:x_max]
+                        # --- Tìm chính xác dòng PCS bằng OCR data ---
+                        data = pytesseract.image_to_data(
+                            region, lang="eng", config="--psm 6", output_type=pytesseract.Output.DICT
+                        )
+                        pcs_y = None
+                        for j, text in enumerate(data["text"]):
+                            if "PCS" in text.upper():
+                                pcs_y = data["top"][j] + data["height"][j]
+                                break
 
-                    ocr = pytesseract.image_to_data(
-                        roi, lang="eng", config="--psm 6", output_type=Output.DICT
-                    )
+                        # Nếu tìm thấy dòng PCS → cắt đến đó
+                        if pcs_y is not None:
+                            y_bottom = y_top + pcs_y + 40  # chỉ +40px an toàn
+                        else:
+                            # không thấy PCS thì chỉ mở rộng 100px nữa
+                            y_bottom = y_bottom - 50
 
-                    y_care = y_code = y_pcs = None
-                    for j, text in enumerate(ocr["text"]):
-                        t = text.strip().upper()
-                        if not t:
-                            continue
-                        if "CARE" in t and y_care is None:
-                            y_care = ocr["top"][j]
-                        if re.search(r"501M", t) and y_code is None:
-                            y_code = ocr["top"][j]
-                        if "PCS" in t:
-                            y_pcs = ocr["top"][j] + ocr["height"][j]
+                        # đảm bảo không vượt ảnh
+                        y_bottom = min(y_bottom, img.shape[0])
 
-                    # --- Xác định điểm cắt dưới ---
-                    if y_pcs:
-                        y_bottom = search_y1 + y_pcs + 60
-                    elif y_code:
-                        y_bottom = search_y1 + y_code + 200
-                    else:
-                        y_bottom = search_y1 + 500  # fallback
+                        crop = img[y_top:y_bottom, x_min:x_max]
+                        _, enc = cv2.imencode(".jpg", crop)
 
-                    y_bottom = min(y_bottom, img.shape[0])
+                        # Đọc phần mã CARE (nếu có)
+                        roi_code = gray[max(y_bottom - 200, 0):y_bottom, x_min:x_max]
+                        code_text = pytesseract.image_to_string(
+                            roi_code, lang="eng", config="--psm 6"
+                        ).strip()
 
-                    # Cắt ra vùng hoàn chỉnh (2 khung + phần dưới)
-                    crop = img[y_top:y_bottom, x_min:x_max]
+                        match = re.search(r"(CARE\s*\d+)", code_text.upper())
+                        filename = match.group(1).replace(" ", "_") + ".jpg" if match else f"care_block_{block_index + 1}.jpg"
 
-                    # Đặt tên file theo text
-                    text_crop = pytesseract.image_to_string(crop, lang="eng", config="--psm 6").upper()
-                    care = re.search(r"(CARE\s*\d+)", text_crop)
-                    code = re.search(r"(501M[A-Z0-9./-]*)", text_crop)
-                    pcs = re.search(r"[\d.,]+\s*PCS", text_crop)
-                    name_parts = []
-                    if care: name_parts.append(care.group(1).replace(" ", "_"))
-                    if code: name_parts.append(code.group(1))
-                    if pcs: name_parts.append(pcs.group(0).replace(" ", "_"))
-                    filename = "_".join(name_parts) if name_parts else f"label_{label_index}"
+                        zipf.writestr(filename, enc.tobytes())
+                        print(f"[INFO] Block {block_index + 1}: {filename}")
 
-                    _, enc = cv2.imencode(".jpg", crop)
-                    zipf.writestr(f"{filename}.jpg", enc.tobytes())
-
-                    print(f"[INFO] Saved {filename}")
-                    label_index += 1
-
-                    # Bỏ qua 2 khung này → sang nhóm kế tiếp
-                    i += 2
-                    continue
-
+                        block_index += 1
+                        i += 2
+                        continue
                 i += 1
 
         zip_buffer.seek(0)
-        return send_file(zip_buffer, as_attachment=True, download_name="labels_split.zip", mimetype="application/zip")
+        return send_file(
+            zip_buffer,
+            as_attachment=True,
+            download_name="care_blocks.zip",
+            mimetype="application/zip"
+        )
 
     except Exception as e:
         print("[ERROR]", e)
