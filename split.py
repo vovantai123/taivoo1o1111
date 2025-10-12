@@ -62,7 +62,7 @@ def split_image():
                         x_max = max(x + w, x2 + w2)
                         y_top = min(y, y2)
                         y_bottom = max(y + h, y2 + h2) + 150
-                        x_min = max(x_min - 20, 0)
+                        x_min = max(x_min - 50, 0)
                         region = gray[y_top:y_bottom, x_min:x_max]
 
 
