@@ -13,6 +13,7 @@ pytesseract.pytesseract.tesseract_cmd = "/usr/bin/tesseract"
 app = Flask(__name__)
 
 @app.route("/split", methods=["POST"])
+@app.route("/split", methods=["POST"])
 def split_image():
     try:
         if "file" not in request.files:
@@ -45,45 +46,43 @@ def split_image():
                     text = text.replace(wrong, right)
                 results.append((y, x, w, h, text.strip()))
 
-        # --- Sắp xếp contour ---
         results.sort(key=lambda r: (r[0], r[1]))
 
         zip_buffer = io.BytesIO()
         with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zipf:
 
-            # ✅ Nếu có đúng 2 khung → gộp toàn bộ và dò text ở vùng trên
+            # ✅ Nếu có đúng 2 khung (như ví dụ)
             if len(results) == 2:
                 y1, x1, w1, h1, _ = results[0]
                 y2, x2, w2, h2, _ = results[1]
 
-                # Bước 1: Gộp vùng cơ bản của 2 khung
-                y_top = max(0, min(y1, y2) - 250)
-                y_bottom = min(img.shape[0], max(y1 + h1, y2 + h2) + 300)
+                # Gộp nhẹ hai khung thành vùng cắt chung
+                y_top = max(0, min(y1, y2) - 200)
                 x_min = max(0, min(x1, x2) - 80)
                 x_max = min(img.shape[1], max(x1 + w1, x2 + w2) + 80)
 
-                # Bước 2: Dò toàn ảnh để tìm dòng chữ trên cùng
+                # Dò dòng cuối cùng có chứa PCS để giới hạn y_bottom
                 ocr_all = pytesseract.image_to_data(
                     gray, lang="eng", config="--psm 6", output_type=Output.DICT
                 )
-                all_tops = []
-                for i, t in enumerate(ocr_all["text"]):
-                    if t.strip():
-                        all_tops.append(ocr_all["top"][i])
-                if all_tops:
-                    top_text = min(all_tops)
-                    # Nếu dòng chữ trên cùng nằm cao hơn vùng cắt hiện tại >100px → mở rộng thêm
-                    if top_text < y_top:
-                        y_top = max(0, top_text - 100)
 
-                # Bước 3: Cắt vùng mới (bao luôn phần text trên đầu)
+                pcs_y_bottom = None
+                for i, t in enumerate(ocr_all["text"]):
+                    text = t.strip().upper()
+                    if "PCS" in text:
+                        pcs_y_bottom = ocr_all["top"][i] + ocr_all["height"][i]
+                if pcs_y_bottom:
+                    y_bottom = min(pcs_y_bottom + 40, img.shape[0])  # +40 để không cắt mất dòng
+                else:
+                    y_bottom = min(img.shape[0], max(y1 + h1, y2 + h2) + 200)
+
                 crop = img[y_top:y_bottom, x_min:x_max]
                 _, enc = cv2.imencode(".jpg", crop)
                 zipf.writestr("merged_two_blocks.jpg", enc.tobytes())
-                print(f"[INFO] 2 blocks merged fully with top text preserved. y_top={y_top}")
+                print(f"[INFO] 2 blocks merged until PCS line (y_bottom={y_bottom}).")
 
-            # ✅ Các trường hợp khác giữ nguyên logic cũ
             else:
+                # ✅ Logic cũ cho các trường hợp nhiều khung
                 block_index = 0
                 i = 0
                 while i < len(results):
@@ -133,6 +132,7 @@ def split_image():
     except Exception as e:
         print("[ERROR]", e)
         return jsonify({"error": str(e)}), 500
+
 
 
 if __name__ == "__main__":
