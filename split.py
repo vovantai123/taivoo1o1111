@@ -20,68 +20,40 @@ def split_image():
         img_bytes = np.frombuffer(file.read(), np.uint8)
         img = cv2.imdecode(img_bytes, cv2.IMREAD_COLOR)
         gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-
-        # Làm sạch ảnh
         gray = cv2.medianBlur(gray, 3)
-        _, thresh = cv2.threshold(gray, 180, 255, cv2.THRESH_BINARY_INV)
 
-        contours, _ = cv2.findContours(thresh, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-        boxes = []
+        # OCR full ảnh, lấy toạ độ từng dòng
+        data = pytesseract.image_to_data(
+            gray, lang="eng", config="--psm 6", output_type=pytesseract.Output.DICT
+        )
 
-        for cnt in contours:
-            x, y, w, h = cv2.boundingRect(cnt)
-            if w > 80 and h > 80:
-                boxes.append((y, x, w, h))
+        pcs_lines = []
+        for i, text in enumerate(data["text"]):
+            if re.search(r"p[\s\.\-_/]*[c0gq][\s\.\-_/]*[s5\$]", text, re.IGNORECASE):
+                top = data["top"][i]
+                height = data["height"][i]
+                pcs_lines.append(top + height)
 
-        boxes.sort(key=lambda r: (r[0], r[1]))
+        if not pcs_lines:
+            return jsonify({"error": "Không tìm thấy dòng PCS nào trong ảnh"}), 404
 
         zip_buffer = io.BytesIO()
         with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zipf:
-            i = 0
+            prev_y = 0
             block_index = 1
 
-            while i < len(boxes):
-                y_start = boxes[i][0]
-                x_min = boxes[i][1]
-                x_max = boxes[i][1] + boxes[i][2]
-                y_bottom = boxes[i][0] + boxes[i][3]
+            for pcs_y in pcs_lines:
+                # Cắt từ phần trên (prev_y) đến dòng PCS (pcs_y)
+                y1 = max(prev_y - 30, 0)
+                y2 = min(pcs_y + 40, img.shape[0])
 
-                found_pcs = False
-                j = i
+                crop = img[y1:y2, :]
+                _, enc = cv2.imencode(".jpg", crop)
+                zipf.writestr(f"block_{block_index:02d}.jpg", enc.tobytes())
 
-                # --- Gom dần xuống, OCR kiểm tra PCS toàn vùng ---
-                while j < len(boxes):
-                    y, x, w, h = boxes[j]
-                    y_bottom = max(y_bottom, y + h)
-                    x_min = min(x_min, x)
-                    x_max = max(x_max, x + w)
-
-                    region = gray[y_start:y_bottom, x_min:x_max]
-                    text = pytesseract.image_to_string(region, lang="eng", config="--psm 6")
-
-                    # Regex “mềm” để bắt PCS bị OCR sai
-                    if re.search(r"p[\s\.\-_/]*c[\s\.\-_/]*s", text, re.IGNORECASE):
-                        found_pcs = True
-                        break
-                    j += 1
-
-                if found_pcs:
-                    pad_top, pad_bottom, pad_left, pad_right = 15, 35, 25, 25
-                    y1 = max(y_start - pad_top, 0)
-                    y2 = min(y_bottom + pad_bottom, img.shape[0])
-                    x1 = max(x_min - pad_left, 0)
-                    x2 = min(x_max + pad_right, img.shape[1])
-
-                    crop = img[y1:y2, x1:x2]
-                    _, enc = cv2.imencode(".jpg", crop)
-                    zipf.writestr(f"block_{block_index:02d}.jpg", enc.tobytes())
-                    print(f"[OK] Block {block_index} có PCS ✅")
-
-                    block_index += 1
-                    i = j + 1
-                else:
-                    print("[SKIP] Không tìm thấy PCS, dừng lại.")
-                    break
+                print(f"[OK] Block {block_index}: cắt đến dòng PCS tại y={pcs_y}")
+                block_index += 1
+                prev_y = pcs_y
 
         zip_buffer.seek(0)
         return send_file(
