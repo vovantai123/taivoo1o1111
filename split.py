@@ -45,6 +45,7 @@ def split_image():
 
                 results.append((y, x, w, h, text.strip()))
 
+        # Sắp xếp theo thứ tự từ trên xuống dưới, trái qua phải
         results.sort(key=lambda r: (r[0], r[1]))
 
         zip_buffer = io.BytesIO()
@@ -58,40 +59,37 @@ def split_image():
                     y2, x2, w2, h2, text2 = results[i + 1]
                     if abs(y - y2) < 100:  # cùng hàng
                         # Xác định vùng gộp chung
-                        x_min = min(x, x2) 
-                        x_max = max(x + w, x2 + w2)
-                        y_top = min(y, y2)
-                        y_bottom = max(y + h, y2 + h2) + 150
-                        x_min = max(x_min - 50, 0)
+                        x_min = max(min(x, x2) - 50, 0)
+                        x_max = min(max(x + w, x2 + w2) + 50, img.shape[1])
+                        y_top = max(min(y, y2) - 30, 0)
+                        y_bottom = min(max(y + h, y2 + h2) + 150, img.shape[0])
+
                         region = gray[y_top:y_bottom, x_min:x_max]
-
-
 
                         # --- Tìm chính xác dòng PCS bằng OCR data ---
                         data = pytesseract.image_to_data(
                             region, lang="eng", config="--psm 6", output_type=pytesseract.Output.DICT
                         )
-                        pcs_y = None
+                        pcs_y_bottom = None
                         for j, text in enumerate(data["text"]):
-                            if "PCS" in text.upper():
-                                pcs_y = data["top"][j] + data["height"][j]
+                            if re.search(r"p\s*\.?\s*c\s*\.?\s*s", text, re.IGNORECASE):
+                                pcs_y_bottom = data["top"][j] + data["height"][j]
                                 break
 
-                        # Nếu tìm thấy dòng PCS → cắt đến đó
-                        if pcs_y is not None:
-                            y_bottom = y_top + pcs_y + 40  # chỉ +40px an toàn
+                        # --- Điều chỉnh biên dưới (y_bottom) ---
+                        if pcs_y_bottom is not None:
+                            # Cắt tới ngay dưới dòng PCS + thêm 30px (an toàn, không mất chữ)
+                            y_bottom = min(y_top + pcs_y_bottom + 30, img.shape[0])
                         else:
-                            # không thấy PCS thì chỉ mở rộng 100px nữa
-                            y_bottom = y_bottom - 50
+                            # Nếu không tìm thấy PCS, giữ nguyên block, mở rộng nhẹ thêm 20px
+                            y_bottom = min(y_bottom + 20, img.shape[0])
 
-                        # đảm bảo không vượt ảnh
-                        y_bottom = min(y_bottom, img.shape[0])
-
+                        # --- Cắt ảnh ---
                         crop = img[y_top:y_bottom, x_min:x_max]
                         _, enc = cv2.imencode(".jpg", crop)
 
-                        # Đọc phần mã CARE (nếu có)
-                        roi_code = gray[max(y_bottom - 200, 0):y_bottom, x_min:x_max]
+                        # --- Đọc phần mã CARE (nếu có) ---
+                        roi_code = gray[max(y_bottom - 250, 0):y_bottom, x_min:x_max]
                         code_text = pytesseract.image_to_string(
                             roi_code, lang="eng", config="--psm 6"
                         ).strip()
