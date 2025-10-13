@@ -23,87 +23,75 @@ def split_image():
         _, thresh = cv2.threshold(gray, 180, 255, cv2.THRESH_BINARY_INV)
 
         contours, _ = cv2.findContours(thresh, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-        results = []
+        boxes = []
 
-        # --- OCR từng khung ---
+        # --- Lưu lại vị trí và text từng khung ---
         for cnt in contours:
             x, y, w, h = cv2.boundingRect(cnt)
             if w > 80 and h > 80:
                 roi = gray[y:y + h, x:x + w]
-                roi = cv2.resize(roi, None, fx=3, fy=3, interpolation=cv2.INTER_CUBIC)
+                roi = cv2.resize(roi, None, fx=2.5, fy=2.5, interpolation=cv2.INTER_CUBIC)
                 roi = cv2.adaptiveThreshold(
                     roi, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
                     cv2.THRESH_BINARY, 31, 9
                 )
                 text = pytesseract.image_to_string(
-                    roi, lang="eng+fra+spa", config="--oem 3 --psm 4"
+                    roi, lang="eng+fra+spa", config="--oem 3 --psm 6"
                 )
+                boxes.append((y, x, w, h, text.strip()))
 
-                replacements = {"&": "À", "¢": "ç", "|": "l", "¢¢": "é"}
-                for wrong, right in replacements.items():
-                    text = text.replace(wrong, right)
-
-                results.append((y, x, w, h, text.strip()))
-
-        # Sắp xếp theo thứ tự từ trên xuống dưới, trái qua phải
-        results.sort(key=lambda r: (r[0], r[1]))
+        # --- Sắp xếp từ trên xuống dưới, trái sang phải ---
+        boxes.sort(key=lambda r: (r[0], r[1]))
 
         zip_buffer = io.BytesIO()
         with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zipf:
-            block_index = 0
             i = 0
-            while i < len(results):
-                y, x, w, h, text1 = results[i]
+            block_index = 1
+            while i < len(boxes):
+                y_start = boxes[i][0]
+                x_min = boxes[i][1]
+                x_max = boxes[i][1] + boxes[i][2]
+                y_bottom = boxes[i][0] + boxes[i][3]
 
-                if i + 1 < len(results):
-                    y2, x2, w2, h2, text2 = results[i + 1]
-                    if abs(y - y2) < 100:  # cùng hàng
-                        # Xác định vùng gộp chung
-                        x_min = max(min(x, x2) - 50, 0)
-                        x_max = min(max(x + w, x2 + w2) + 50, img.shape[1])
-                        y_top = max(min(y, y2) - 30, 0)
-                        y_bottom = min(max(y + h, y2 + h2) + 150, img.shape[0])
+                found_pcs = False
 
-                        region = gray[y_top:y_bottom, x_min:x_max]
+                # Gom dần xuống cho đến khi gặp “PCS”
+                j = i
+                while j < len(boxes):
+                    y, x, w, h, text = boxes[j]
+                    y_bottom = max(y_bottom, y + h)
+                    x_min = min(x_min, x)
+                    x_max = max(x_max, x + w)
 
-                        # --- Tìm chính xác dòng PCS bằng OCR data ---
-                        data = pytesseract.image_to_data(
-                            region, lang="eng", config="--psm 6", output_type=pytesseract.Output.DICT
-                        )
-                        pcs_y_bottom = None
-                        for j, text in enumerate(data["text"]):
-                            if re.search(r"p\s*\.?\s*c\s*\.?\s*s", text, re.IGNORECASE):
-                                pcs_y_bottom = data["top"][j] + data["height"][j]
-                                break
+                    if re.search(r"p\s*\.?\s*c\s*\.?\s*s", text, re.IGNORECASE):
+                        found_pcs = True
+                        break
+                    j += 1
 
-                        # --- Điều chỉnh biên dưới (y_bottom) ---
-                        if pcs_y_bottom is not None:
-                            # Cắt tới ngay dưới dòng PCS + thêm 30px (an toàn, không mất chữ)
-                            y_bottom = min(y_top + pcs_y_bottom + 30, img.shape[0])
-                        else:
-                            # Nếu không tìm thấy PCS, giữ nguyên block, mở rộng nhẹ thêm 20px
-                            y_bottom = min(y_bottom + 20, img.shape[0])
+                if found_pcs:
+                    # Mở rộng biên một chút để không cắt mất chữ
+                    pad_top = 20
+                    pad_bottom = 40
+                    pad_left = 30
+                    pad_right = 30
 
-                        # --- Cắt ảnh ---
-                        crop = img[y_top:y_bottom, x_min:x_max]
-                        _, enc = cv2.imencode(".jpg", crop)
+                    y1 = max(y_start - pad_top, 0)
+                    y2 = min(y_bottom + pad_bottom, img.shape[0])
+                    x1 = max(x_min - pad_left, 0)
+                    x2 = min(x_max + pad_right, img.shape[1])
 
-                        # --- Đọc phần mã CARE (nếu có) ---
-                        roi_code = gray[max(y_bottom - 250, 0):y_bottom, x_min:x_max]
-                        code_text = pytesseract.image_to_string(
-                            roi_code, lang="eng", config="--psm 6"
-                        ).strip()
+                    crop = img[y1:y2, x1:x2]
+                    _, enc = cv2.imencode(".jpg", crop)
 
-                        match = re.search(r"(CARE\s*\d+)", code_text.upper())
-                        filename = match.group(1).replace(" ", "_") + ".jpg" if match else f"care_block_{block_index + 1}.jpg"
+                    zipf.writestr(f"block_{block_index:02d}.jpg", enc.tobytes())
+                    print(f"[OK] Cắt block {block_index:02d} (PCS found at box {j})")
 
-                        zipf.writestr(filename, enc.tobytes())
-                        print(f"[INFO] Block {block_index + 1}: {filename}")
-
-                        block_index += 1
-                        i += 2
-                        continue
-                i += 1
+                    block_index += 1
+                    i = j + 1  # bắt đầu block mới từ khung sau PCS
+                else:
+                    # nếu không có PCS nữa thì bỏ qua phần còn lại
+                    print(f"[SKIP] Không tìm thấy PCS sau khung {i}")
+                    break
 
         zip_buffer.seek(0)
         return send_file(
@@ -120,3 +108,4 @@ def split_image():
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=5000)
+
