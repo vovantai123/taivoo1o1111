@@ -70,6 +70,7 @@ def split_image():
                         x_max = max(x + w, x2 + w2)
                         y_top = min(y, y2)
                         y_bottom = max(y + h, y2 + h2) + 200  # quét dư xuống để dò chữ
+                        x_max = min(x_max + 50, img.shape[1])  # mở rộng sang phải thêm 50px
 
                         region = gray[y_top:y_bottom, x_min:x_max]
 
